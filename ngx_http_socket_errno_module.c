@@ -13,8 +13,15 @@
 
 
 typedef struct {
-	ngx_chain_t         *free;
-	ngx_chain_t         *busy;
+	ngx_uint_t	 last;
+	ngx_uint_t	 count;
+	ngx_uint_t	 found;
+	ngx_uint_t	 index;
+	ngx_chain_t	 *free;
+	ngx_chain_t	 *busy;
+	ngx_chain_t	 *out;
+	ngx_chain_t	 *in;
+	ngx_chain_t	 **last_out;
 } ngx_http_socket_errno_ctx_t;
 
 typedef struct {
@@ -172,34 +179,139 @@ static ngx_int_t ngx_http_replace_filter_init(ngx_conf_t *cf)
 }
 
 
+
+#define ERR_PAGE_INDEX(x) ((x) - NGX_HTTP_UNKNOWN_ERROR)
+static const ngx_str_t err_page[] = {
+	ngx_string("<html>"
+		   "<head><title>520 Unknown Error</title></head>"
+		   "<body bgcolor=\"white\">"
+		   "<center><h1>Unknown Error 520</h1></center>"
+		   "<hr><center>socket errno</center>"
+		   "</body></html>"),
+
+	ngx_string("<html>"
+		   "<head><title>521 Host is Down</title></head>"
+		   "<body bgcolor=\"white\">"
+		   "<center><h1>521 Host is Down</h1></center>"
+		   "<hr><center>socket errno</center>"
+		   "</body></html>"),
+
+	ngx_string("<html>"
+		   "<head><title>522 Connection Time Out</title></head>"
+		   "<body bgcolor=\"white\">"
+		   "<center><h1>522 Connection Time Out</h1></center>"
+		   "<hr><center>socket errno</center>"
+		   "</body></html>"),
+
+	ngx_string("<html>"
+		   "<head><title>523 Connection Reset By Peer</title></head>"
+		   "<body bgcolor=\"white\">"
+		   "<center><h1>523 Connection Reset By Peer</h1></center>"
+		   "<hr><center>socket errno</center>"
+		   "</body></html>"),
+
+	ngx_string("<html>"
+		   "<head><title>524 Connection Refused</title></head>"
+		   "<body bgcolor=\"white\">"
+		   "<center><h1>524 Connection Refused</h1></center>"
+		   "<hr><center>socket errno</center>"
+		   "</body></html>"),
+
+	ngx_string("<html>"
+		   "<head><title>525 Host Unreach</title></head>"
+		   "<body bgcolor=\"white\">"
+		   "<center><h1>525 Host Unreach</h1></center>"
+		   "<hr><center>socket errno</center>"
+		   "</body></html>")
+
+};
+
+
 static ngx_int_t ngx_http_replace_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
 	ngx_http_socket_errno_loc_conf_t  *cf;
+	ngx_http_socket_errno_ctx_t *ctx;
+	ngx_chain_t  *cl;
+	ngx_buf_t  *b;
+	ngx_int_t rc;
+
 
 	cf = ngx_http_get_module_loc_conf(r, ngx_http_socket_errno_module);
-	if (cf == NULL || !cf->enabled || in == NULL || r->header_only) {
+	ctx = ngx_http_get_module_ctx(r, ngx_http_socket_errno_module);
+
+	if (cf == NULL || ctx == NULL || !cf->enabled || in == NULL || r->header_only) {
 		return ngx_http_next_body_filter(r, in);
 	}
 
+
 	if (r->err_status >= NGX_HTTP_UNKNOWN_ERROR) {
+		ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "body errno %d", r->err_status);
+		if (ngx_chain_add_copy(r->pool, &ctx->in, in) != NGX_OK) {
+			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+				      "[ngx_http_socket_errno]: unable to copy"
+				      " input chain - in");
+			return NGX_ERROR;
+		}
 
+		ctx->last_out = &ctx->out;
 
+		cl = ngx_chain_get_free_buf(r->pool, &ctx->free);
+		if (cl == NULL) {
+			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+				      "[ngx_http_socket_errno]: "
+				      "unable to allocate output chain");
+			return NGX_ERROR;
+		}
+
+		b = cl->buf;
+		ngx_memzero(b, sizeof(ngx_buf_t));
+
+		b->tag = (ngx_buf_tag_t)&ngx_http_socket_errno_module;
+		b->memory = 1;
+		b->pos = err_page[ERR_PAGE_INDEX(r->err_status)].data;
+		b->last = b->pos + err_page[ERR_PAGE_INDEX(r->err_status)].len;
+
+		if (r == r->main) {
+			b->last_buf = 1;
+		} else {
+			b->last_in_chain = 1;
+		}
+
+		ctx->out = cl;
+		ctx->out->next = NULL;
+		r->keepalive = 0;
+
+		rc = ngx_http_next_body_filter(r, ctx->out);
+		ngx_chain_update_chains(r->pool, &ctx->free, &ctx->busy, &ctx->out,
+					(ngx_buf_tag_t)&ngx_http_socket_errno_module);
+		ctx->in = NULL;
+		return rc;
 	}
+
 
 	return ngx_http_next_body_filter(r, in);
 }
 
+
+static void ngx_set_err_status(ngx_http_request_t *r, ngx_uint_t status_code)
+{
+	r->err_status = status_code;
+	r->headers_out.status = status_code;
+	if (r == r->main) {
+		ngx_http_clear_content_length(r);
+	}
+}
+
 static ngx_int_t ngx_http_replace_header_filter(ngx_http_request_t *r)
 {
+	ngx_http_socket_errno_ctx_t *ctx;
 	ngx_http_socket_errno_loc_conf_t  *cf;
 	int err = 0;
-	ngx_peer_connection_t pc;
 	ngx_http_upstream_t *up = r->upstream;
 
 
 	if (up) {
-		pc = up->peer;
-		err = pc.socket_errno;
+		err = up->peer.socket_errno;
 		ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "errno %d", err);
 	}
 
@@ -208,26 +320,34 @@ static ngx_int_t ngx_http_replace_header_filter(ngx_http_request_t *r)
 		return ngx_http_next_header_filter(r);
 	}
 
+	ctx = ngx_http_get_module_ctx(r, ngx_http_socket_errno_module);
+	if (ctx == NULL) {
+		ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_socket_errno_module));
+		if (ctx == NULL) {
+			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+				      "[socket errno]: cannot allocate ctx"
+				      " memory");
+			return ngx_http_next_header_filter(r);
+		}
+
+		ngx_http_set_ctx(r, ctx, ngx_http_socket_errno_module);
+	}
+
 	switch (err) {
 	case NGX_ETIMEDOUT:
-		r->err_status = NGX_HTTP_CONNECTION_TIMED_OUT;
-		r->headers_out.status = NGX_HTTP_CONNECTION_TIMED_OUT;
+		ngx_set_err_status(r, NGX_HTTP_CONNECTION_TIMED_OUT);
 		break;
 	case NGX_ECONNREFUSED:
-		r->err_status = NGX_HTTP_CONNECTION_REFUSED;
-		r->headers_out.status = NGX_HTTP_CONNECTION_REFUSED;
+		ngx_set_err_status(r, NGX_HTTP_CONNECTION_REFUSED);
 		break;
 	case NGX_ECONNRESET:
-		r->err_status = NGX_HTTP_CONNECTION_RESET_BY_PEER;
-		r->headers_out.status = NGX_HTTP_CONNECTION_RESET_BY_PEER;
+		ngx_set_err_status(r, NGX_HTTP_CONNECTION_RESET_BY_PEER);
 		break;
 	case NGX_EHOSTDOWN:
-		r->err_status = NGX_HTTP_HOST_IS_DOWN;
-		r->headers_out.status = NGX_HTTP_HOST_IS_DOWN;
+		ngx_set_err_status(r, NGX_HTTP_HOST_IS_DOWN);
 		break;
 	case NGX_EHOSTUNREACH:
-		r->err_status = NGX_HTTP_HOST_UNREACH;
-		r->headers_out.status = NGX_HTTP_HOST_UNREACH;
+		ngx_set_err_status(r, NGX_HTTP_HOST_UNREACH);
 		break;
 	}
 

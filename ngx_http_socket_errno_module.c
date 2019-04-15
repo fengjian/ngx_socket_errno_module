@@ -237,21 +237,27 @@ static ngx_int_t ngx_http_replace_body_filter(ngx_http_request_t *r, ngx_chain_t
 
 
 	cf = ngx_http_get_module_loc_conf(r, ngx_http_socket_errno_module);
-	ctx = ngx_http_get_module_ctx(r, ngx_http_socket_errno_module);
 
-	if (cf == NULL || ctx == NULL || !cf->enabled || in == NULL || r->header_only) {
+	if (cf == NULL || !cf->enabled || in == NULL || r->header_only) {
 		return ngx_http_next_body_filter(r, in);
 	}
 
 
 	if (r->err_status >= NGX_HTTP_UNKNOWN_ERROR) {
-		ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "body errno %d", r->err_status);
-		if (ngx_chain_add_copy(r->pool, &ctx->in, in) != NGX_OK) {
-			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-				      "[ngx_http_socket_errno]: unable to copy"
-				      " input chain - in");
-			return NGX_ERROR;
+		ctx = ngx_http_get_module_ctx(r, ngx_http_socket_errno_module);
+		if (ctx == NULL) {
+			ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_socket_errno_module));
+			if (ctx == NULL) {
+				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+					      "[socket errno]: cannot allocate ctx"
+					      " memory");
+				return ngx_http_next_body_filter(r, in);
+			}
+
+			ngx_http_set_ctx(r, ctx, ngx_http_socket_errno_module);
 		}
+
+		ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "body errno %d", r->err_status);
 
 		ctx->last_out = &ctx->out;
 
@@ -284,7 +290,6 @@ static ngx_int_t ngx_http_replace_body_filter(ngx_http_request_t *r, ngx_chain_t
 		rc = ngx_http_next_body_filter(r, ctx->out);
 		ngx_chain_update_chains(r->pool, &ctx->free, &ctx->busy, &ctx->out,
 					(ngx_buf_tag_t)&ngx_http_socket_errno_module);
-		ctx->in = NULL;
 		return rc;
 	}
 
@@ -304,7 +309,6 @@ static void ngx_set_err_status(ngx_http_request_t *r, ngx_uint_t status_code)
 
 static ngx_int_t ngx_http_replace_header_filter(ngx_http_request_t *r)
 {
-	ngx_http_socket_errno_ctx_t *ctx;
 	ngx_http_socket_errno_loc_conf_t  *cf;
 	int err = 0;
 	ngx_http_upstream_t *up = r->upstream;
@@ -320,18 +324,6 @@ static ngx_int_t ngx_http_replace_header_filter(ngx_http_request_t *r)
 		return ngx_http_next_header_filter(r);
 	}
 
-	ctx = ngx_http_get_module_ctx(r, ngx_http_socket_errno_module);
-	if (ctx == NULL) {
-		ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_socket_errno_module));
-		if (ctx == NULL) {
-			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-				      "[socket errno]: cannot allocate ctx"
-				      " memory");
-			return ngx_http_next_header_filter(r);
-		}
-
-		ngx_http_set_ctx(r, ctx, ngx_http_socket_errno_module);
-	}
 
 	switch (err) {
 	case NGX_ETIMEDOUT:

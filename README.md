@@ -31,7 +31,7 @@ make install
 
 ```
 
-# use
+# usage
 
 ```
 #nginx.conf

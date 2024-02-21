@@ -1,8 +1,11 @@
-# add 52x-Server-Error
+#  Cloudflare's extension for HTTP status codes
+
+Introducing a GitHub project aimed at modifying the NGINX source code to implement Cloudflare's extension for HTTP status codes at the socket level. This project focuses on enhancing NGINX's capabilities to handle socket-level errors and respond with appropriate HTTP status codes, as specified by Cloudflare's extension. By integrating Cloudflare's functionality into NGINX, this project enhances web server reliability and provides more accurate error responses to clients, improving overall user experience. Developers and system administrators seeking to enhance NGINX's error handling capabilities will find this project valuable for implementing Cloudflare's socket-level error handling features. Explore the modified NGINX source code and leverage Cloudflare's extension to enhance your web server's error handling capabilities.
+
 
 ```
 /*
-like cloudflare 52x Error
+cloudflare 52x Error
 https://support.cloudflare.com/hc/en-us/articles/115003011431-5xx-Server-Error
 */
 
